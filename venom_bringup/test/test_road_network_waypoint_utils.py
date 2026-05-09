@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
+from venom_bringup.craic_waypoint_utils import geodetic_to_local_xy
 from venom_bringup.road_network_waypoint_utils import (
     load_planned_road_route,
     load_route_waypoints,
@@ -145,3 +147,57 @@ def test_write_waypoints_yaml_round_trip(tmp_path: Path):
 
     assert payload['route_name'] == 'demo'
     assert payload['waypoints'][0]['x'] == 0.0
+
+
+def test_geodetic_route_uses_local_utm_offsets(tmp_path: Path):
+    road_network_file = tmp_path / 'road_network.yaml'
+    origin_lon = 116.33547
+    origin_lat = 39.20677
+    goal_lon = 116.33552
+    goal_lat = 39.20684
+    _write_yaml(
+        road_network_file,
+        {
+            'coordinate_mode': 'geodetic',
+            'nodes': {
+                'start': {'longitude': origin_lon, 'latitude': origin_lat, 'attr': 1},
+                'goal': {'longitude': goal_lon, 'latitude': goal_lat, 'attr': 8},
+            },
+            'routes': {'main': ['start', 'goal']},
+        },
+    )
+
+    route = load_planned_road_route(
+        str(road_network_file),
+        route_name='main',
+        map_origin_longitude_deg=origin_lon,
+        map_origin_latitude_deg=origin_lat,
+    )
+
+    expected_x, expected_y = geodetic_to_local_xy(
+        longitude_deg=goal_lon,
+        latitude_deg=goal_lat,
+        origin_longitude_deg=origin_lon,
+        origin_latitude_deg=origin_lat,
+        map_origin_yaw_rad=0.0,
+        map_origin_x_m=0.0,
+        map_origin_y_m=0.0,
+    )
+
+    assert route.waypoints[0].x_m == pytest.approx(0.0, abs=1e-6)
+    assert route.waypoints[0].y_m == pytest.approx(0.0, abs=1e-6)
+    assert route.waypoints[1].x_m == pytest.approx(expected_x, abs=1e-6)
+    assert route.waypoints[1].y_m == pytest.approx(expected_y, abs=1e-6)
+
+
+def test_geodetic_projection_rejects_cross_utm_zone_origin():
+    with pytest.raises(ValueError, match='same UTM zone'):
+        geodetic_to_local_xy(
+            longitude_deg=6.1,
+            latitude_deg=0.0,
+            origin_longitude_deg=5.9,
+            origin_latitude_deg=0.0,
+            map_origin_yaw_rad=0.0,
+            map_origin_x_m=0.0,
+            map_origin_y_m=0.0,
+        )

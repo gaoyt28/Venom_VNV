@@ -87,8 +87,16 @@ def generate_launch_description():
         DeclareLaunchArgument('use_start_goal_xy', default_value='false'),
         DeclareLaunchArgument('blocked_edges', default_value=''),
         DeclareLaunchArgument('coordinate_mode', default_value='geodetic'),
-        DeclareLaunchArgument('map_origin_longitude_deg', default_value='0.0'),
-        DeclareLaunchArgument('map_origin_latitude_deg', default_value='0.0'),
+        DeclareLaunchArgument(
+            'map_origin_longitude_deg',
+            default_value='0.0',
+            description='Longitude of the local map origin used for UTM projection.',
+        ),
+        DeclareLaunchArgument(
+            'map_origin_latitude_deg',
+            default_value='0.0',
+            description='Latitude of the local map origin used for UTM projection.',
+        ),
         DeclareLaunchArgument('map_origin_x_m', default_value='0.0'),
         DeclareLaunchArgument('map_origin_y_m', default_value='0.0'),
         DeclareLaunchArgument('map_origin_yaw_rad', default_value='0.0'),
