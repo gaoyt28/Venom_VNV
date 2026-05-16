@@ -13,14 +13,18 @@ from venom_overtake_msgs.msg import TrackedObstacleArray
 class LeadSelectorNode(Node):
     def __init__(self) -> None:
         super().__init__('lead_selector_node')
-        self.declare_parameter('same_lane_only', True)
         self.declare_parameter('max_forward_distance_m', 30.0)
-        self.declare_parameter('max_lateral_offset_m', 1.0)
+        self.declare_parameter('max_lateral_offset_m', 1.8)
+        self.declare_parameter('min_dynamic_speed_mps', 0.2)
+        self.declare_parameter('min_relative_closing_speed_mps', 0.1)
         self.declare_parameter('odom_topic', '/odometry/global')
 
-        self._same_lane_only = bool(self.get_parameter('same_lane_only').value)
         self._max_forward_distance = float(self.get_parameter('max_forward_distance_m').value)
         self._max_lateral_offset = float(self.get_parameter('max_lateral_offset_m').value)
+        self._min_dynamic_speed = float(self.get_parameter('min_dynamic_speed_mps').value)
+        self._min_relative_closing_speed = float(
+            self.get_parameter('min_relative_closing_speed_mps').value
+        )
         odom_topic = str(self.get_parameter('odom_topic').value)
 
         self._ego_speed_mps = 0.0
@@ -35,11 +39,14 @@ class LeadSelectorNode(Node):
         best: TrackedObstacle | None = None
         best_gap = float('inf')
         for obstacle in msg.obstacles:
-            if self._same_lane_only and not obstacle.is_same_lane:
-                continue
             if obstacle.longitudinal_s <= 0.0 or obstacle.longitudinal_s > self._max_forward_distance:
                 continue
             if abs(obstacle.lateral_d) > self._max_lateral_offset:
+                continue
+            relative_speed = self._ego_speed_mps - obstacle.speed_mps
+            if obstacle.speed_mps < self._min_dynamic_speed:
+                continue
+            if relative_speed < self._min_relative_closing_speed:
                 continue
             if obstacle.longitudinal_s < best_gap:
                 best_gap = obstacle.longitudinal_s

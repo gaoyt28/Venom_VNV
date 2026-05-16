@@ -15,9 +15,10 @@ tracker_node:
 
 lead_selector_node:
   ros__parameters:
-    same_lane_only: true
     max_forward_distance_m: 30.0
-    max_lateral_offset_m: 1.0
+    max_lateral_offset_m: 1.8
+    min_dynamic_speed_mps: 0.2
+    min_relative_closing_speed_mps: 0.1
     odom_topic: /Odometry
 
 overtake_manager_node:
@@ -39,3 +40,5 @@ overtake_manager_node:
     left_lane_clear: true
     return_lane_clear: true
     overtake_allowed: true
+    target_pass_buffer_m: 1.0
+    target_lost_timeout_s: 1.0

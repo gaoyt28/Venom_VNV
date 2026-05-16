@@ -10,6 +10,8 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from venom_overtake_msgs.msg import LeadVehicle
 from venom_overtake_msgs.msg import OvertakeDecision
+from venom_overtake_msgs.msg import TrackedObstacle
+from venom_overtake_msgs.msg import TrackedObstacleArray
 
 from venom_overtake_manager.decision_logic import DecisionConfig
 from venom_overtake_manager.lane_route_manager import LaneRouteManager
@@ -17,6 +19,7 @@ from venom_overtake_manager.lane_route_manager import RouteNames
 from venom_overtake_manager.safety_checks import can_prepare_overtake
 from venom_overtake_manager.safety_checks import can_return_to_lane
 from venom_overtake_manager.safety_checks import should_follow
+from venom_overtake_manager.safety_checks import target_vehicle_passed
 
 
 class OvertakeState(str, Enum):
@@ -58,9 +61,12 @@ class OvertakeManagerNode(Node):
         self._state = OvertakeState.CRUISE
         self._last_lead = LeadVehicle()
         self._ego_speed_mps = 0.0
+        self._tracks: dict[int, TrackedObstacle] = {}
+        self._active_target_id = 0
         self._state_enter_time = time.monotonic()
 
         self.create_subscription(LeadVehicle, '/planning/lead_vehicle', self._on_lead_vehicle, 10)
+        self.create_subscription(TrackedObstacleArray, '/perception/tracked_obstacles', self._on_tracks, 10)
         self.create_subscription(Odometry, odom_topic, self._on_odom, 20)
         self._decision_pub = self.create_publisher(OvertakeDecision, '/planning/overtake_decision', 10)
         self._route_pub = self.create_publisher(String, '/planning/requested_route', 10)
@@ -84,9 +90,14 @@ class OvertakeManagerNode(Node):
         self.declare_parameter('left_lane_clear', True)
         self.declare_parameter('return_lane_clear', True)
         self.declare_parameter('overtake_allowed', True)
+        self.declare_parameter('target_pass_buffer_m', 1.0)
+        self.declare_parameter('target_lost_timeout_s', 1.0)
 
     def _on_lead_vehicle(self, msg: LeadVehicle) -> None:
         self._last_lead = msg
+
+    def _on_tracks(self, msg: TrackedObstacleArray) -> None:
+        self._tracks = {int(obstacle.id): obstacle for obstacle in msg.obstacles}
 
     def _on_odom(self, msg: Odometry) -> None:
         self._ego_speed_mps = math.hypot(msg.twist.twist.linear.x, msg.twist.twist.linear.y)
@@ -103,17 +114,22 @@ class OvertakeManagerNode(Node):
         msg.data = route_name
         self._route_pub.publish(msg)
 
+    def _target_track(self) -> TrackedObstacle | None:
+        if self._active_target_id == 0:
+            return None
+        return self._tracks.get(self._active_target_id)
+
     def _tick(self) -> None:
         lead = self._last_lead
+        overtake_allowed = bool(self.get_parameter('overtake_allowed').value)
         left_lane_clear = bool(self.get_parameter('left_lane_clear').value)
         return_lane_clear = bool(self.get_parameter('return_lane_clear').value)
-        overtake_allowed = bool(self.get_parameter('overtake_allowed').value)
         reason = 'no lead vehicle'
         requested_route = self._route_manager.cruise_route()
         commanded_lane = 'main'
         target_speed = 0.0
         speed_limit = self._config.cruise_speed_limit_mps
-        target_id = 0
+        target_id = self._active_target_id
 
         if self._state == OvertakeState.CRUISE:
             if lead.valid:
@@ -125,6 +141,7 @@ class OvertakeManagerNode(Node):
                     overtake_allowed=overtake_allowed,
                     slow_threshold_mps=self._config.slow_vehicle_speed_threshold_mps,
                 ):
+                    self._active_target_id = int(lead.target.id)
                     self._transition(OvertakeState.PREPARE_OVERTAKE)
                     reason = 'slow lead vehicle detected, preparing overtake'
                 elif should_follow(
@@ -149,6 +166,7 @@ class OvertakeManagerNode(Node):
                 overtake_allowed=overtake_allowed,
                 slow_threshold_mps=self._config.slow_vehicle_speed_threshold_mps,
             ):
+                self._active_target_id = int(lead.target.id)
                 self._transition(OvertakeState.PREPARE_OVERTAKE)
                 reason = 'lead vehicle slowed down enough for overtake'
             requested_route = self._route_manager.cruise_route()
@@ -166,16 +184,26 @@ class OvertakeManagerNode(Node):
             requested_route = self._route_manager.overtake_left_route()
             commanded_lane = 'left'
             reason = 'executing left overtake'
-            if lead.valid:
-                target_speed = lead.target.speed_mps
-                target_id = lead.target.id
-                if can_return_to_lane(
-                    lead_gap_ahead_m=lead.gap_m,
+            target_track = self._target_track()
+            if target_track is not None:
+                target_speed = float(target_track.speed_mps)
+                target_id = int(target_track.id)
+                pass_buffer_m = float(self.get_parameter('target_pass_buffer_m').value)
+                if target_vehicle_passed(
+                    target_longitudinal_s=float(target_track.longitudinal_s),
+                    pass_buffer_m=pass_buffer_m,
+                ) and can_return_to_lane(
+                    lead_gap_ahead_m=abs(float(target_track.longitudinal_s)),
                     return_lane_clear=return_lane_clear,
-                    min_return_gap_m=self._config.overtake_completion_buffer_m,
+                    min_return_gap_m=pass_buffer_m,
                 ):
                     self._transition(OvertakeState.RETURN_RIGHT)
-                    reason = 'lead vehicle cleared, returning to main lane'
+                    reason = 'target passed, returning to cruise route'
+            elif time.monotonic() - self._state_enter_time > float(
+                self.get_parameter('target_lost_timeout_s').value
+            ):
+                self._transition(OvertakeState.RETURN_RIGHT)
+                reason = 'target lost after overtake, returning to cruise route'
             if time.monotonic() - self._state_enter_time > self._config.max_overtake_duration_s:
                 self._transition(OvertakeState.ABORT)
                 reason = 'overtake timeout, aborting'
@@ -185,6 +213,7 @@ class OvertakeManagerNode(Node):
             commanded_lane = 'main'
             self._publish_route(requested_route)
             self._transition(OvertakeState.CRUISE)
+            self._active_target_id = 0
             reason = 'requested return route'
 
         elif self._state == OvertakeState.ABORT:
@@ -192,6 +221,7 @@ class OvertakeManagerNode(Node):
             commanded_lane = 'main'
             self._publish_route(requested_route)
             speed_limit = self._config.follow_speed_limit_mps
+            self._active_target_id = 0
             self._transition(OvertakeState.FOLLOW if lead.valid else OvertakeState.CRUISE)
             reason = 'abort complete'
 
