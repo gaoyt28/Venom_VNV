@@ -24,8 +24,10 @@ class TrackState:
     y: float
     length: float = 1.0
     width: float = 0.8
-    vx: float = 0.0
-    vy: float = 0.0
+    relative_vx: float = 0.0
+    relative_vy: float = 0.0
+    absolute_vx: float = 0.0
+    absolute_vy: float = 0.0
     stamp_sec: float = 0.0
 
 
@@ -73,6 +75,8 @@ class TrackerNode(Node):
 
         self._tracks: Dict[int, TrackState] = {}
         self._next_track_id = 1
+        self._ego_linear_x = 0.0
+        self._ego_linear_y = 0.0
 
         self.create_subscription(LaserScan, self._scan_topic, self._on_scan, 20)
         self.create_subscription(Odometry, odom_topic, self._on_odom, 20)
@@ -80,7 +84,8 @@ class TrackerNode(Node):
         self.create_timer(1.0 / max(publish_rate_hz, 1.0), self._publish_tracks)
 
     def _on_odom(self, msg: Odometry) -> None:
-        return
+        self._ego_linear_x = float(msg.twist.twist.linear.x)
+        self._ego_linear_y = float(msg.twist.twist.linear.y)
 
     def _is_valid_range(self, range_value: float) -> bool:
         return (
@@ -159,25 +164,29 @@ class TrackerNode(Node):
                     y=detection.y,
                     length=detection.length,
                     width=detection.width,
+                    absolute_vx=self._ego_linear_x,
+                    absolute_vy=self._ego_linear_y,
                     stamp_sec=now_sec,
                 )
                 continue
 
             previous = remaining_tracks.pop(best_track_id)
-            vx = 0.0
-            vy = 0.0
+            relative_vx = 0.0
+            relative_vy = 0.0
             dt = now_sec - previous.stamp_sec
             if dt > 1e-3:
-                vx = (detection.x - previous.x) / dt
-                vy = (detection.y - previous.y) / dt
+                relative_vx = (detection.x - previous.x) / dt
+                relative_vy = (detection.y - previous.y) / dt
             next_tracks[best_track_id] = TrackState(
                 obstacle_id=best_track_id,
                 x=detection.x,
                 y=detection.y,
                 length=detection.length,
                 width=detection.width,
-                vx=vx,
-                vy=vy,
+                relative_vx=relative_vx,
+                relative_vy=relative_vy,
+                absolute_vx=relative_vx + self._ego_linear_x,
+                absolute_vy=relative_vy + self._ego_linear_y,
                 stamp_sec=now_sec,
             )
 
@@ -211,13 +220,14 @@ class TrackerNode(Node):
             obstacle.pose.position.z = 0.0
             obstacle.pose.orientation.w = 1.0
             obstacle.twist = Twist()
-            obstacle.twist.linear.x = track.vx
-            obstacle.twist.linear.y = track.vy
-            obstacle.speed_mps = float(math.hypot(track.vx, track.vy))
+            obstacle.twist.linear.x = track.absolute_vx
+            obstacle.twist.linear.y = track.absolute_vy
+            obstacle.speed_mps = float(math.hypot(track.absolute_vx, track.absolute_vy))
             obstacle.length = track.length
             obstacle.width = track.width
             obstacle.confidence = 0.6
-            obstacle.is_static = obstacle.speed_mps < self._static_speed_threshold
+            relative_speed = math.hypot(track.relative_vx, track.relative_vy)
+            obstacle.is_static = relative_speed < self._static_speed_threshold
             obstacle.longitudinal_s = track.x
             obstacle.lateral_d = track.y
             obstacle.is_same_lane = classify_same_lane(track.y, self._same_lane_threshold)
