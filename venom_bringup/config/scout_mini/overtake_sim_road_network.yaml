@@ -1,0 +1,54 @@
+coordinate_mode: cartesian_m
+
+nodes:
+  main_start:
+    x: 0.0
+    y: 0.0
+    attr: 1
+  main_mid_1:
+    x: 4.0
+    y: 0.0
+    attr: 1
+  main_mid_2:
+    x: 8.0
+    y: 0.0
+    attr: 1
+  main_goal:
+    x: 12.0
+    y: 0.0
+    attr: 1
+  left_entry:
+    x: 3.0
+    y: 1.2
+    attr: 4
+  left_pass_1:
+    x: 6.0
+    y: 1.2
+    attr: 6
+  left_pass_2:
+    x: 9.0
+    y: 1.2
+    attr: 6
+  return_merge:
+    x: 10.5
+    y: 0.0
+    attr: 5
+
+routes:
+  main_lane_patrol:
+    - main_start
+    - main_mid_1
+    - main_mid_2
+    - main_goal
+  main_lane_overtake_left:
+    - main_start
+    - main_mid_1
+    - left_entry
+    - left_pass_1
+    - left_pass_2
+    - return_merge
+    - main_goal
+  main_lane_return_right:
+    - left_pass_2
+    - return_merge
+    - main_goal

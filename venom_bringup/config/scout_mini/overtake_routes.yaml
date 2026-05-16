@@ -1,0 +1,10 @@
+routes:
+  main_lane_patrol:
+    lane_id: main
+    description: Default cruising route on the original lane.
+  main_lane_overtake_left:
+    lane_id: left
+    description: Temporary left-side route for overtaking a slow or stopped lead vehicle.
+  main_lane_return_right:
+    lane_id: main
+    description: Return route to merge back to the original lane after the pass.

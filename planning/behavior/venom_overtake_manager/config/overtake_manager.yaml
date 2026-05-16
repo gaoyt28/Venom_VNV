@@ -1,0 +1,36 @@
+tracker_node:
+  ros__parameters:
+    scan_topic: /scan
+    odom_topic: /odometry/global
+    publish_rate_hz: 10.0
+    cluster_distance_threshold_m: 0.45
+    min_cluster_points: 3
+    min_detection_range_m: 0.5
+    max_detection_range_m: 25.0
+    front_fov_half_angle_rad: 1.35
+    track_association_distance_m: 1.5
+    same_lane_lateral_threshold_m: 0.9
+    static_speed_threshold_mps: 0.25
+    track_timeout_sec: 1.0
+
+lead_selector_node:
+  ros__parameters:
+    same_lane_only: true
+    max_forward_distance_m: 30.0
+    max_lateral_offset_m: 1.0
+
+overtake_manager_node:
+  ros__parameters:
+    slow_vehicle_speed_threshold_mps: 1.39
+    follow_vehicle_speed_threshold_mps: 5.56
+    desired_follow_gap_m: 4.0
+    desired_follow_time_s: 1.5
+    overtake_completion_buffer_m: 2.5
+    min_return_gap_m: 1.0
+    max_overtake_duration_s: 8.0
+    cruise_speed_limit_mps: 2.5
+    follow_speed_limit_mps: 1.8
+    overtake_speed_limit_mps: 2.2
+    lane_change_left_route: main_lane_overtake_left
+    lane_return_route: main_lane_return_right
+    lane_cruise_route: main_lane_patrol
