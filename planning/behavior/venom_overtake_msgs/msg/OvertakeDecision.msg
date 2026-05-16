@@ -1,0 +1,12 @@
+std_msgs/Header header
+string state
+bool follow_mode
+bool overtake_mode
+bool return_mode
+uint32 target_id
+string target_lane_id
+string commanded_lane_id
+string requested_route
+string reason
+float32 target_speed_mps
+float32 ego_speed_limit_mps
