@@ -17,6 +17,7 @@ from nav_msgs.msg import Odometry
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from rcl_interfaces.msg import Parameter, ParameterDescriptor, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 
@@ -111,6 +112,14 @@ class CraicMissionCommander(BasicNavigator):
             self._on_requested_route,
             10,
         )
+        self._scan_sub = None
+        if self.overtake_scan_topic:
+            self._scan_sub = self.create_subscription(
+                LaserScan,
+                self.overtake_scan_topic,
+                self._on_overtake_scan,
+                20,
+            )
         self._controller_param_client = self.create_client(
             SetParameters,
             '/controller_server/set_parameters',
@@ -134,6 +143,10 @@ class CraicMissionCommander(BasicNavigator):
         self._route_switch_in_progress = False
         self._route_switch_cooldown_sec = 1.0
         self._last_route_switch_time = 0.0
+        self._latest_overtake_scan: Optional[LaserScan] = None
+        self._latest_overtake_scan_time = 0.0
+        self._active_generated_waypoints_in_use = False
+        self._active_overtake_geometry_enabled = False
         self._behavior_config = WaypointBehaviorConfig(
             default_final_stop_distance_m=self.final_goal_stop_distance_m,
             cruise_max_linear_speed_mps=self.cruise_max_linear_speed_mps,
@@ -263,6 +276,16 @@ class CraicMissionCommander(BasicNavigator):
         self.declare_parameter('overtake_max_linear_speed_mps', 1.15)
         self.declare_parameter('overtake_max_speed_xy_mps', 1.15)
         self.declare_parameter('overtake_max_angular_speed_radps', 0.75)
+        self.declare_parameter('overtake_use_obstacle_detection', True)
+        self.declare_parameter('overtake_scan_topic', '/scan')
+        self.declare_parameter('overtake_require_scan_for_lane_change', False)
+        self.declare_parameter('overtake_scan_timeout_sec', 1.0)
+        self.declare_parameter('overtake_min_trigger_distance_m', 0.50)
+        self.declare_parameter('overtake_trigger_distance_m', 3.0)
+        self.declare_parameter('overtake_front_sector_half_angle_rad', 0.35)
+        self.declare_parameter('overtake_left_sector_min_angle_rad', 0.35)
+        self.declare_parameter('overtake_left_sector_max_angle_rad', 1.10)
+        self.declare_parameter('overtake_left_clearance_distance_m', 1.20)
         self.declare_parameter('u_turn_position_tolerance_m', 0.25)
         self.declare_parameter('u_turn_yaw_tolerance_rad', 0.16)
         self.declare_parameter('u_turn_settle_time_sec', 0.50)
@@ -441,6 +464,34 @@ class CraicMissionCommander(BasicNavigator):
         )
         self.overtake_max_angular_speed_radps = float(
             self.get_parameter('overtake_max_angular_speed_radps').value
+        )
+        self.overtake_use_obstacle_detection = bool(
+            self.get_parameter('overtake_use_obstacle_detection').value
+        )
+        self.overtake_scan_topic = str(self.get_parameter('overtake_scan_topic').value)
+        self.overtake_require_scan_for_lane_change = bool(
+            self.get_parameter('overtake_require_scan_for_lane_change').value
+        )
+        self.overtake_scan_timeout_sec = float(
+            self.get_parameter('overtake_scan_timeout_sec').value
+        )
+        self.overtake_min_trigger_distance_m = float(
+            self.get_parameter('overtake_min_trigger_distance_m').value
+        )
+        self.overtake_trigger_distance_m = float(
+            self.get_parameter('overtake_trigger_distance_m').value
+        )
+        self.overtake_front_sector_half_angle_rad = float(
+            self.get_parameter('overtake_front_sector_half_angle_rad').value
+        )
+        self.overtake_left_sector_min_angle_rad = float(
+            self.get_parameter('overtake_left_sector_min_angle_rad').value
+        )
+        self.overtake_left_sector_max_angle_rad = float(
+            self.get_parameter('overtake_left_sector_max_angle_rad').value
+        )
+        self.overtake_left_clearance_distance_m = float(
+            self.get_parameter('overtake_left_clearance_distance_m').value
         )
         self.u_turn_position_tolerance_m = float(
             self.get_parameter('u_turn_position_tolerance_m').value
@@ -687,6 +738,10 @@ class CraicMissionCommander(BasicNavigator):
             orientation.w,
         )
 
+    def _on_overtake_scan(self, msg: LaserScan) -> None:
+        self._latest_overtake_scan = msg
+        self._latest_overtake_scan_time = time.monotonic()
+
     def _to_pose_stamped(self, waypoint: CraicWaypoint) -> PoseStamped:
         pose = PoseStamped()
         pose.header.frame_id = self.waypoint_frame_id
@@ -742,6 +797,73 @@ class CraicMissionCommander(BasicNavigator):
             waypoint.x,
             waypoint.y,
         )
+
+    def _scan_sector_min_distance(
+        self,
+        min_angle_rad: float,
+        max_angle_rad: float,
+    ) -> Optional[float]:
+        scan = self._latest_overtake_scan
+        if scan is None:
+            return None
+
+        best_distance = None
+        current_angle = scan.angle_min
+        for range_value in scan.ranges:
+            if min_angle_rad <= current_angle <= max_angle_rad and math.isfinite(range_value):
+                if scan.range_min <= range_value <= scan.range_max:
+                    if best_distance is None or range_value < best_distance:
+                        best_distance = range_value
+            current_angle += scan.angle_increment
+        return best_distance
+
+    def _should_use_overtake_geometry(self) -> bool:
+        if not self.overtake_use_obstacle_detection:
+            return True
+
+        scan_age_sec = time.monotonic() - self._latest_overtake_scan_time
+        if self._latest_overtake_scan is None or scan_age_sec > self.overtake_scan_timeout_sec:
+            if self.overtake_require_scan_for_lane_change:
+                self.get_logger().warn(
+                    'Skipping overtake lane-change geometry because no fresh laser scan is available.'
+                )
+                return False
+            self.get_logger().warn(
+                'No fresh laser scan available for overtake detection; falling back to fixed overtake geometry.'
+            )
+            return True
+
+        front_min_distance = self._scan_sector_min_distance(
+            -self.overtake_front_sector_half_angle_rad,
+            self.overtake_front_sector_half_angle_rad,
+        )
+        if (
+            front_min_distance is None
+            or front_min_distance < self.overtake_min_trigger_distance_m
+            or front_min_distance > self.overtake_trigger_distance_m
+        ):
+            self.get_logger().info(
+                'Overtake waypoint reached but no front obstacle was detected; staying in-lane.'
+            )
+            return False
+
+        left_min_distance = self._scan_sector_min_distance(
+            self.overtake_left_sector_min_angle_rad,
+            self.overtake_left_sector_max_angle_rad,
+        )
+        if (
+            left_min_distance is not None
+            and left_min_distance < self.overtake_left_clearance_distance_m
+        ):
+            self.get_logger().warn(
+                f'Overtake requested but left side is not clear enough ({left_min_distance:.2f} m); staying in-lane.'
+            )
+            return False
+
+        self.get_logger().info(
+            f'Overtake obstacle detected at {front_min_distance:.2f} m; executing left-pass geometry.'
+        )
+        return True
 
     def _rotate_to_yaw(
         self,
@@ -905,6 +1027,10 @@ class CraicMissionCommander(BasicNavigator):
         waypoint: CraicWaypoint,
         plan: WaypointExecutionPlan,
     ) -> bool:
+        if self._active_overtake_geometry_enabled:
+            self.get_logger().info(
+                'Completing overtake by merging back onto the nominal lane and aligning heading.'
+            )
         if not self._creep_to_waypoint(
             waypoint,
             plan.position_tolerance_m or 0.40,
@@ -1154,7 +1280,26 @@ class CraicMissionCommander(BasicNavigator):
         self._active_plan = plan
         self._active_slice_start = plan.start_index
         self._current_abs_waypoint_index = plan.start_index
-        accepted = self.followWaypoints(self._goal_poses[plan.start_index : plan.end_index + 1])
+        self._active_generated_waypoints_in_use = False
+        self._active_overtake_geometry_enabled = False
+        use_generated_waypoints = bool(plan.generated_waypoints)
+        if plan.profile_name == 'overtake' and plan.generated_waypoints:
+            use_generated_waypoints = self._should_use_overtake_geometry()
+            self._active_overtake_geometry_enabled = use_generated_waypoints
+        if use_generated_waypoints:
+            waypoint_poses = [self._to_pose_stamped(waypoint) for waypoint in plan.generated_waypoints]
+            self._active_generated_waypoints_in_use = True
+            self.get_logger().info(
+                f'Generated {len(plan.generated_waypoints)} geometry waypoint(s) for '
+                f'{plan.profile_name} at task_index={self._waypoints[plan.goal_index].index}.'
+            )
+        else:
+            waypoint_poses = self._goal_poses[plan.start_index : plan.end_index + 1]
+            if plan.profile_name == 'overtake':
+                self.get_logger().info(
+                    'Overtake geometry was skipped for this waypoint; using nominal in-lane goal.'
+                )
+        accepted = self.followWaypoints(waypoint_poses)
         if accepted:
             self._following_waypoints = True
             self._last_progress_time = time.monotonic()
@@ -1339,10 +1484,13 @@ class CraicMissionCommander(BasicNavigator):
             return
 
         relative_index = int(feedback.current_waypoint)
-        absolute_index = min(
-            self._active_slice_start + relative_index,
-            len(self._waypoints) - 1,
-        )
+        if self._active_plan is not None and self._active_generated_waypoints_in_use:
+            absolute_index = self._active_plan.goal_index
+        else:
+            absolute_index = min(
+                self._active_slice_start + relative_index,
+                len(self._waypoints) - 1,
+            )
         self._current_abs_waypoint_index = absolute_index
         self._log_current_waypoint(absolute_index)
 

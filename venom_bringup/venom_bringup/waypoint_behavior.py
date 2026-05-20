@@ -66,6 +66,324 @@ def compute_intermediate_turn_yaw(
     return normalize_angle(current_yaw + turn_step)
 
 
+def _distance(a_xy: tuple[float, float], b_xy: tuple[float, float]) -> float:
+    return math.hypot(b_xy[0] - a_xy[0], b_xy[1] - a_xy[1])
+
+
+def _heading(a_xy: tuple[float, float], b_xy: tuple[float, float]) -> float:
+    return math.atan2(b_xy[1] - a_xy[1], b_xy[0] - a_xy[0])
+
+
+def _sample_quadratic_bezier(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    num_samples: int,
+) -> list[tuple[float, float]]:
+    samples = []
+    for sample_index in range(num_samples):
+        t_value = sample_index / max(num_samples - 1, 1)
+        one_minus_t = 1.0 - t_value
+        samples.append(
+            (
+                one_minus_t * one_minus_t * p0[0]
+                + 2.0 * one_minus_t * t_value * p1[0]
+                + t_value * t_value * p2[0],
+                one_minus_t * one_minus_t * p0[1]
+                + 2.0 * one_minus_t * t_value * p1[1]
+                + t_value * t_value * p2[1],
+            )
+        )
+    return samples
+
+
+def _sample_cubic_bezier(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    p3: tuple[float, float],
+    num_samples: int,
+) -> list[tuple[float, float]]:
+    samples = []
+    for sample_index in range(num_samples):
+        t_value = sample_index / max(num_samples - 1, 1)
+        one_minus_t = 1.0 - t_value
+        samples.append(
+            (
+                one_minus_t**3 * p0[0]
+                + 3.0 * one_minus_t * one_minus_t * t_value * p1[0]
+                + 3.0 * one_minus_t * t_value * t_value * p2[0]
+                + t_value**3 * p3[0],
+                one_minus_t**3 * p0[1]
+                + 3.0 * one_minus_t * one_minus_t * t_value * p1[1]
+                + 3.0 * one_minus_t * t_value * t_value * p2[1]
+                + t_value**3 * p3[1],
+            )
+        )
+    return samples
+
+
+def _sample_linear_points(
+    start_xy: tuple[float, float],
+    end_xy: tuple[float, float],
+    num_samples: int,
+) -> list[tuple[float, float]]:
+    samples = []
+    for sample_index in range(num_samples):
+        t_value = sample_index / max(num_samples - 1, 1)
+        samples.append(
+            (
+                start_xy[0] + (end_xy[0] - start_xy[0]) * t_value,
+                start_xy[1] + (end_xy[1] - start_xy[1]) * t_value,
+            )
+        )
+    return samples
+
+
+def _xy_with_heading(x_value: float, y_value: float, heading_rad: float, distance_m: float) -> tuple[float, float]:
+    return (
+        x_value + math.cos(heading_rad) * distance_m,
+        y_value + math.sin(heading_rad) * distance_m,
+    )
+
+
+def _make_generated_waypoints(
+    base_waypoint: CraicWaypoint,
+    points_xy: Sequence[tuple[float, float]],
+    profile_name: str,
+) -> tuple[CraicWaypoint, ...]:
+    if not points_xy:
+        return ()
+
+    generated_waypoints = []
+    for idx, (x_value, y_value) in enumerate(points_xy):
+        if idx < len(points_xy) - 1:
+            yaw_value = _heading((x_value, y_value), points_xy[idx + 1])
+        elif generated_waypoints:
+            yaw_value = generated_waypoints[-1].yaw
+        else:
+            yaw_value = base_waypoint.yaw
+
+        generated_waypoints.append(
+            CraicWaypoint(
+                index=base_waypoint.index,
+                x=x_value,
+                y=y_value,
+                yaw=normalize_angle(yaw_value),
+                action=base_waypoint.action,
+                source_a=base_waypoint.source_a,
+                source_b=base_waypoint.source_b,
+                action_label=f'{base_waypoint.action_label}_{profile_name}_{idx}',
+            )
+        )
+    return tuple(generated_waypoints)
+
+
+def _build_turn_waypoints(
+    waypoints: Sequence[CraicWaypoint],
+    start_index: int,
+    profile_name: str,
+) -> tuple[CraicWaypoint, ...]:
+    if start_index <= 0 or start_index >= len(waypoints) - 1:
+        return ()
+
+    previous_waypoint = waypoints[start_index - 1]
+    action_waypoint = waypoints[start_index]
+    next_waypoint = waypoints[start_index + 1]
+
+    prev_xy = (previous_waypoint.x, previous_waypoint.y)
+    current_xy = (action_waypoint.x, action_waypoint.y)
+    next_xy = (next_waypoint.x, next_waypoint.y)
+
+    inbound_heading = _heading(prev_xy, current_xy)
+    outbound_heading = _heading(current_xy, next_xy)
+    min_leg_length = min(_distance(prev_xy, current_xy), _distance(current_xy, next_xy))
+    if min_leg_length < 0.2:
+        return ()
+
+    trim_distance = min(1.2, max(0.35, min_leg_length * 0.35))
+    entry_xy = _xy_with_heading(action_waypoint.x, action_waypoint.y, inbound_heading + math.pi, trim_distance)
+    control_distance = trim_distance * 0.8
+    control_1 = _xy_with_heading(entry_xy[0], entry_xy[1], inbound_heading, control_distance)
+    control_2 = _xy_with_heading(action_waypoint.x, action_waypoint.y, outbound_heading + math.pi, control_distance)
+    sampled_xy = _sample_cubic_bezier(entry_xy, control_1, control_2, current_xy, num_samples=5)
+    return _make_generated_waypoints(action_waypoint, sampled_xy, profile_name)
+
+
+def _build_lane_change_waypoints(
+    waypoints: Sequence[CraicWaypoint],
+    start_index: int,
+    profile_name: str,
+) -> tuple[CraicWaypoint, ...]:
+    action_waypoint = waypoints[start_index]
+    current_xy = (action_waypoint.x, action_waypoint.y)
+
+    if start_index > 0:
+        previous_waypoint = waypoints[start_index - 1]
+        start_heading = _heading((previous_waypoint.x, previous_waypoint.y), current_xy)
+        start_distance = _distance((previous_waypoint.x, previous_waypoint.y), current_xy)
+    elif start_index + 1 < len(waypoints):
+        next_waypoint = waypoints[start_index + 1]
+        start_heading = _heading(current_xy, (next_waypoint.x, next_waypoint.y))
+        start_distance = _distance(current_xy, (next_waypoint.x, next_waypoint.y))
+    else:
+        return ()
+
+    if start_distance < 0.2:
+        return ()
+
+    start_anchor = _xy_with_heading(
+        action_waypoint.x,
+        action_waypoint.y,
+        start_heading + math.pi,
+        min(1.8, max(0.8, start_distance * 0.65)),
+    )
+    heading_unit = (math.cos(start_heading), math.sin(start_heading))
+    lateral_delta = (
+        (current_xy[0] - start_anchor[0]) * -heading_unit[1]
+        + (current_xy[1] - start_anchor[1]) * heading_unit[0]
+    )
+    longitudinal = min(1.2, max(0.6, start_distance * 0.45))
+    control_1 = (
+        start_anchor[0] + heading_unit[0] * longitudinal,
+        start_anchor[1] + heading_unit[1] * longitudinal,
+    )
+    control_2 = (
+        current_xy[0] - heading_unit[0] * longitudinal + (-heading_unit[1]) * lateral_delta * 0.35,
+        current_xy[1] - heading_unit[1] * longitudinal + heading_unit[0] * lateral_delta * 0.35,
+    )
+    sampled_xy = _sample_cubic_bezier(start_anchor, control_1, control_2, current_xy, num_samples=5)
+    return _make_generated_waypoints(action_waypoint, sampled_xy, profile_name)
+
+
+def _build_u_turn_waypoints(
+    waypoints: Sequence[CraicWaypoint],
+    start_index: int,
+    profile_name: str,
+) -> tuple[CraicWaypoint, ...]:
+    if start_index <= 0:
+        return ()
+
+    previous_waypoint = waypoints[start_index - 1]
+    action_waypoint = waypoints[start_index]
+    prev_xy = (previous_waypoint.x, previous_waypoint.y)
+    current_xy = (action_waypoint.x, action_waypoint.y)
+    inbound_heading = _heading(prev_xy, current_xy)
+    outbound_heading = action_waypoint.yaw
+    leg_length = _distance(prev_xy, current_xy)
+    if leg_length < 0.2:
+        return ()
+
+    trim_distance = min(1.2, max(0.45, leg_length * 0.35))
+    entry_xy = _xy_with_heading(action_waypoint.x, action_waypoint.y, inbound_heading + math.pi, trim_distance)
+    turn_direction = math.copysign(1.0, normalize_angle(outbound_heading - inbound_heading))
+    turn_radius = min(1.6, max(0.8, leg_length * 0.65))
+    control_1 = (
+        entry_xy[0] + (-math.sin(inbound_heading)) * turn_direction * turn_radius,
+        entry_xy[1] + math.cos(inbound_heading) * turn_direction * turn_radius,
+    )
+    control_2 = (
+        action_waypoint.x
+        + (-math.sin(outbound_heading)) * turn_direction * turn_radius
+        - math.cos(outbound_heading) * trim_distance * 0.5,
+        action_waypoint.y
+        + math.cos(outbound_heading) * turn_direction * turn_radius
+        - math.sin(outbound_heading) * trim_distance * 0.5,
+    )
+    sampled_xy = _sample_cubic_bezier(entry_xy, control_1, control_2, current_xy, num_samples=6)
+    return _make_generated_waypoints(action_waypoint, sampled_xy, profile_name)
+
+
+def _build_overtake_waypoints(
+    waypoints: Sequence[CraicWaypoint],
+    start_index: int,
+    profile_name: str,
+) -> tuple[CraicWaypoint, ...]:
+    action_waypoint = waypoints[start_index]
+    current_xy = (action_waypoint.x, action_waypoint.y)
+
+    if start_index > 0:
+        previous_xy = (waypoints[start_index - 1].x, waypoints[start_index - 1].y)
+        heading_rad = _heading(previous_xy, current_xy)
+        leg_length = _distance(previous_xy, current_xy)
+    elif start_index + 1 < len(waypoints):
+        next_xy = (waypoints[start_index + 1].x, waypoints[start_index + 1].y)
+        heading_rad = _heading(current_xy, next_xy)
+        leg_length = _distance(current_xy, next_xy)
+    else:
+        heading_rad = action_waypoint.yaw
+        leg_length = 3.0
+
+    if leg_length < 0.2:
+        return ()
+
+    lane_shift_m = min(1.6, max(0.9, leg_length * 0.28))
+    approach_distance_m = min(3.0, max(1.2, leg_length * 0.60))
+    pass_distance_m = min(2.8, max(1.2, leg_length * 0.45))
+
+    heading_unit = (math.cos(heading_rad), math.sin(heading_rad))
+    left_normal = (-heading_unit[1], heading_unit[0])
+
+    entry_xy = (
+        current_xy[0] - heading_unit[0] * approach_distance_m,
+        current_xy[1] - heading_unit[1] * approach_distance_m,
+    )
+    left_entry_control = (
+        entry_xy[0] + heading_unit[0] * (approach_distance_m * 0.35) + left_normal[0] * lane_shift_m * 0.85,
+        entry_xy[1] + heading_unit[1] * (approach_distance_m * 0.35) + left_normal[1] * lane_shift_m * 0.85,
+    )
+    left_lane_start = (
+        current_xy[0] - heading_unit[0] * pass_distance_m + left_normal[0] * lane_shift_m,
+        current_xy[1] - heading_unit[1] * pass_distance_m + left_normal[1] * lane_shift_m,
+    )
+    left_lane_end = (
+        current_xy[0] - heading_unit[0] * (pass_distance_m * 0.35) + left_normal[0] * lane_shift_m,
+        current_xy[1] - heading_unit[1] * (pass_distance_m * 0.35) + left_normal[1] * lane_shift_m,
+    )
+    return_control = (
+        current_xy[0] - heading_unit[0] * (pass_distance_m * 0.15) + left_normal[0] * lane_shift_m * 0.45,
+        current_xy[1] - heading_unit[1] * (pass_distance_m * 0.15) + left_normal[1] * lane_shift_m * 0.45,
+    )
+
+    entry_curve = _sample_quadratic_bezier(
+        entry_xy,
+        left_entry_control,
+        left_lane_start,
+        num_samples=4,
+    )
+    cruise_segment = _sample_linear_points(
+        left_lane_start,
+        left_lane_end,
+        num_samples=3,
+    )
+    return_curve = _sample_quadratic_bezier(
+        left_lane_end,
+        return_control,
+        current_xy,
+        num_samples=4,
+    )
+
+    sampled_xy = entry_curve[:-1] + cruise_segment[:-1] + return_curve
+    return _make_generated_waypoints(action_waypoint, sampled_xy, profile_name)
+
+
+def build_generated_action_waypoints(
+    waypoints: Sequence[CraicWaypoint],
+    start_index: int,
+    profile_name: str,
+) -> tuple[CraicWaypoint, ...]:
+    action = waypoints[start_index].action
+    if action in {TURN_LEFT_ACTION, TURN_RIGHT_ACTION}:
+        return _build_turn_waypoints(waypoints, start_index, profile_name)
+    if action in {LANE_CHANGE_LEFT_ACTION, LANE_CHANGE_RIGHT_ACTION}:
+        return _build_lane_change_waypoints(waypoints, start_index, profile_name)
+    if action == OVERTAKE_ACTION:
+        return _build_overtake_waypoints(waypoints, start_index, profile_name)
+    if action == U_TURN_ACTION:
+        return _build_u_turn_waypoints(waypoints, start_index, profile_name)
+    return ()
+
+
 @dataclass(frozen=True)
 class WaypointBehaviorConfig:
     default_final_stop_distance_m: float
@@ -135,6 +453,7 @@ class WaypointExecutionPlan:
     yaw_tolerance_rad: float | None = None
     settle_time_sec: float = 0.0
     goal_retry_limit: int = 0
+    generated_waypoints: tuple[CraicWaypoint, ...] = ()
 
     @property
     def is_special_action(self) -> bool:
@@ -149,6 +468,11 @@ def build_execution_plan(
     """Choose how the next mission slice should be executed."""
     waypoint = waypoints[start_index]
     if waypoint.action == TURN_LEFT_ACTION:
+        generated_waypoints = build_generated_action_waypoints(
+            waypoints,
+            start_index,
+            'turn_left',
+        )
         return WaypointExecutionPlan(
             profile_name='turn_left',
             start_index=start_index,
@@ -163,8 +487,14 @@ def build_execution_plan(
             yaw_tolerance_rad=config.left_turn_yaw_tolerance_rad,
             settle_time_sec=config.left_turn_settle_time_sec,
             goal_retry_limit=config.special_action_retry_limit,
+            generated_waypoints=generated_waypoints,
         )
     if waypoint.action == TURN_RIGHT_ACTION:
+        generated_waypoints = build_generated_action_waypoints(
+            waypoints,
+            start_index,
+            'turn_right',
+        )
         return WaypointExecutionPlan(
             profile_name='turn_right',
             start_index=start_index,
@@ -179,8 +509,14 @@ def build_execution_plan(
             yaw_tolerance_rad=config.right_turn_yaw_tolerance_rad,
             settle_time_sec=config.right_turn_settle_time_sec,
             goal_retry_limit=config.special_action_retry_limit,
+            generated_waypoints=generated_waypoints,
         )
     if waypoint.action == LANE_CHANGE_LEFT_ACTION:
+        generated_waypoints = build_generated_action_waypoints(
+            waypoints,
+            start_index,
+            'lane_change_left',
+        )
         return WaypointExecutionPlan(
             profile_name='lane_change_left',
             start_index=start_index,
@@ -195,8 +531,14 @@ def build_execution_plan(
             yaw_tolerance_rad=config.lane_change_left_yaw_tolerance_rad,
             settle_time_sec=config.lane_change_left_settle_time_sec,
             goal_retry_limit=config.special_action_retry_limit,
+            generated_waypoints=generated_waypoints,
         )
     if waypoint.action == LANE_CHANGE_RIGHT_ACTION:
+        generated_waypoints = build_generated_action_waypoints(
+            waypoints,
+            start_index,
+            'lane_change_right',
+        )
         return WaypointExecutionPlan(
             profile_name='lane_change_right',
             start_index=start_index,
@@ -211,8 +553,14 @@ def build_execution_plan(
             yaw_tolerance_rad=config.lane_change_right_yaw_tolerance_rad,
             settle_time_sec=config.lane_change_right_settle_time_sec,
             goal_retry_limit=config.special_action_retry_limit,
+            generated_waypoints=generated_waypoints,
         )
     if waypoint.action == OVERTAKE_ACTION:
+        generated_waypoints = build_generated_action_waypoints(
+            waypoints,
+            start_index,
+            'overtake',
+        )
         return WaypointExecutionPlan(
             profile_name='overtake',
             start_index=start_index,
@@ -227,8 +575,14 @@ def build_execution_plan(
             yaw_tolerance_rad=config.overtake_yaw_tolerance_rad,
             settle_time_sec=config.overtake_settle_time_sec,
             goal_retry_limit=config.special_action_retry_limit,
+            generated_waypoints=generated_waypoints,
         )
     if waypoint.action == U_TURN_ACTION:
+        generated_waypoints = build_generated_action_waypoints(
+            waypoints,
+            start_index,
+            'u_turn',
+        )
         return WaypointExecutionPlan(
             profile_name='u_turn',
             start_index=start_index,
@@ -243,6 +597,7 @@ def build_execution_plan(
             yaw_tolerance_rad=config.u_turn_yaw_tolerance_rad,
             settle_time_sec=config.u_turn_settle_time_sec,
             goal_retry_limit=config.special_action_retry_limit,
+            generated_waypoints=generated_waypoints,
         )
     if waypoint.action == PARK_ACTION:
         return WaypointExecutionPlan(

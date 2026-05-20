@@ -2,21 +2,22 @@ from venom_bringup.craic_waypoint_utils import CraicWaypoint
 from venom_bringup.waypoint_behavior import (
     WaypointBehaviorConfig,
     build_execution_plan,
+    build_generated_action_waypoints,
     build_resume_plan,
     compute_intermediate_turn_yaw,
     compute_staging_pose,
 )
 
 
-def make_waypoint(index: int, action: int, x_value: float) -> CraicWaypoint:
+def make_waypoint(index: int, action: int, x_value: float, y_value: float = 0.0, yaw: float = 0.0) -> CraicWaypoint:
     return CraicWaypoint(
         index=index,
         x=x_value,
-        y=0.0,
-        yaw=0.0,
+        y=y_value,
+        yaw=yaw,
         action=action,
         source_a=x_value,
-        source_b=0.0,
+        source_b=y_value,
         action_label=str(action),
     )
 
@@ -43,8 +44,8 @@ def test_default_plan_groups_until_next_special_action():
 def test_left_turn_plan_is_single_waypoint_with_tighter_profile():
     config = WaypointBehaviorConfig(default_final_stop_distance_m=1.0)
     waypoints = [
-        make_waypoint(0, 3, 0.0),
-        make_waypoint(1, 1, 1.0),
+        make_waypoint(0, 3, 0.0, 0.0),
+        make_waypoint(1, 1, 1.0, 0.0),
     ]
 
     plan = build_execution_plan(waypoints, 0, config)
@@ -113,6 +114,7 @@ def test_overtake_plan_uses_overtake_profile():
     assert plan.profile_name == 'overtake'
     assert plan.max_linear_speed_mps == config.overtake_max_linear_speed_mps
     assert plan.xy_goal_tolerance_m == config.overtake_position_tolerance_m
+    assert plan.generated_waypoints
 
 
 def test_u_turn_plan_uses_u_turn_profile():
@@ -216,3 +218,70 @@ def test_special_action_plan_remains_singleton_for_retry():
     assert retried_turn_left_plan.profile_name == 'turn_left'
     assert next_plan.start_index == 1
     assert next_plan.profile_name == 'turn_right'
+
+
+def test_turn_action_generates_geometry_waypoints():
+    config = WaypointBehaviorConfig(default_final_stop_distance_m=1.0)
+    waypoints = [
+        make_waypoint(0, 1, 0.0, 0.0),
+        make_waypoint(1, 3, 2.0, 0.0),
+        make_waypoint(2, 1, 2.0, 2.0),
+    ]
+
+    plan = build_execution_plan(waypoints, 1, config)
+
+    assert plan.generated_waypoints
+    assert len(plan.generated_waypoints) == 5
+    assert plan.generated_waypoints[0].x < waypoints[1].x
+    assert abs(plan.generated_waypoints[-1].x - waypoints[1].x) < 1e-6
+    assert abs(plan.generated_waypoints[-1].y - waypoints[1].y) < 1e-6
+    assert abs(plan.generated_waypoints[-1].yaw - 1.5707963267948966) < 0.35
+
+
+def test_lane_change_action_generates_geometry_waypoints():
+    config = WaypointBehaviorConfig(default_final_stop_distance_m=1.0)
+    waypoints = [
+        make_waypoint(0, 1, 0.0, 0.0),
+        make_waypoint(1, 4, 3.0, 1.0),
+        make_waypoint(2, 1, 6.0, 1.0),
+    ]
+
+    plan = build_execution_plan(waypoints, 1, config)
+
+    assert plan.generated_waypoints
+    assert len(plan.generated_waypoints) == 5
+    assert plan.generated_waypoints[0].y < plan.generated_waypoints[-1].y
+
+
+def test_u_turn_action_generates_geometry_waypoints():
+    config = WaypointBehaviorConfig(default_final_stop_distance_m=1.0)
+    waypoints = [
+        make_waypoint(0, 1, 0.0, 0.0),
+        make_waypoint(1, 7, 2.0, 0.0, yaw=3.141592653589793),
+        make_waypoint(2, 1, 0.0, 0.0),
+    ]
+
+    generated_waypoints = build_generated_action_waypoints(waypoints, 1, 'u_turn')
+
+    assert generated_waypoints
+    assert len(generated_waypoints) == 6
+    assert generated_waypoints[0].x < waypoints[1].x
+    assert abs(generated_waypoints[-1].x - waypoints[1].x) < 1e-6
+    assert abs(generated_waypoints[-1].yaw - 3.141592653589793) < 0.5
+
+
+def test_overtake_action_generates_geometry_waypoints():
+    config = WaypointBehaviorConfig(default_final_stop_distance_m=1.0)
+    waypoints = [
+        make_waypoint(0, 1, 0.0, 0.0),
+        make_waypoint(1, 6, 4.0, 0.0),
+        make_waypoint(2, 1, 8.0, 0.0),
+    ]
+
+    plan = build_execution_plan(waypoints, 1, config)
+
+    assert plan.generated_waypoints
+    assert len(plan.generated_waypoints) >= 8
+    assert plan.generated_waypoints[0].x < waypoints[1].x
+    assert max(point.y for point in plan.generated_waypoints) > waypoints[1].y
+    assert abs(plan.generated_waypoints[-1].x - waypoints[1].x) < 1e-6
