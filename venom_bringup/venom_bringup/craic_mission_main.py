@@ -18,7 +18,6 @@ from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from rcl_interfaces.msg import Parameter, ParameterDescriptor, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 
 from venom_bringup.craic_waypoint_utils import CraicWaypoint, load_craic_waypoints
@@ -106,12 +105,6 @@ class CraicMissionCommander(BasicNavigator):
             self._on_pose_update,
             20,
         )
-        self._requested_route_sub = self.create_subscription(
-            String,
-            '/planning/requested_route',
-            self._on_requested_route,
-            10,
-        )
         self._scan_sub = None
         if self.overtake_scan_topic:
             self._scan_sub = self.create_subscription(
@@ -138,11 +131,6 @@ class CraicMissionCommander(BasicNavigator):
         self._current_yaw: Optional[float] = None
         self._active_plan: Optional[WaypointExecutionPlan] = None
         self._special_action_retry_count = 0
-        self._pending_route_switch_name: Optional[str] = None
-        self._last_applied_route_name: Optional[str] = self._planned_route_name or self.route_name or None
-        self._route_switch_in_progress = False
-        self._route_switch_cooldown_sec = 1.0
-        self._last_route_switch_time = 0.0
         self._latest_overtake_scan: Optional[LaserScan] = None
         self._latest_overtake_scan_time = 0.0
         self._active_generated_waypoints_in_use = False
@@ -594,101 +582,6 @@ class CraicMissionCommander(BasicNavigator):
         self.special_action_retry_limit = int(
             self.get_parameter('special_action_retry_limit').value
         )
-
-    def _load_route_waypoints(self, route_name: Optional[str]) -> None:
-        if not self.road_network_file:
-            raise RuntimeError('Dynamic route switching requires road_network_file to be set.')
-
-        planned_route = load_planned_road_route(
-            file_path=self.road_network_file,
-            route_name=route_name or None,
-            route_nodes=self.route_nodes or None,
-            default_frame_id=self.waypoint_frame_id,
-            coordinate_mode=self.coordinate_mode,
-            map_origin_longitude_deg=self.map_origin_longitude_deg,
-            map_origin_latitude_deg=self.map_origin_latitude_deg,
-            map_origin_yaw_rad=self.map_origin_yaw_rad,
-            map_origin_x_m=self.map_origin_x_m,
-            map_origin_y_m=self.map_origin_y_m,
-            start_node_id=self.start_node_id or None,
-            goal_node_id=self.goal_node_id or None,
-            start_x_m=self.start_x_m,
-            start_y_m=self.start_y_m,
-            goal_x_m=self.goal_x_m,
-            goal_y_m=self.goal_y_m,
-            blocked_edges=self.blocked_edges or None,
-        )
-        self._waypoints = route_to_craic_waypoints(planned_route)
-        self._goal_poses = [self._to_pose_stamped(waypoint) for waypoint in self._waypoints]
-        self._route_node_ids = planned_route.route_node_ids
-        self._planned_route_name = planned_route.route_name
-        self._last_logged_waypoint_index = -1
-
-    def _find_nearest_waypoint_index(self) -> int:
-        if self._current_pose_xy is None or not self._waypoints:
-            return 0
-        return min(
-            range(len(self._waypoints)),
-            key=lambda idx: distance_xy(
-                self._current_pose_xy[0],
-                self._current_pose_xy[1],
-                self._waypoints[idx].x,
-                self._waypoints[idx].y,
-            ),
-        )
-
-    def _on_requested_route(self, msg: String) -> None:
-        requested_route = msg.data.strip()
-        if not requested_route or not self.road_network_file:
-            return
-        if requested_route == self._last_applied_route_name:
-            return
-        if self._pending_route_switch_name == requested_route:
-            return
-        now = time.monotonic()
-        if now - self._last_route_switch_time < self._route_switch_cooldown_sec:
-            return
-        self._pending_route_switch_name = requested_route
-        self.get_logger().info(f'Received dynamic route switch request: {requested_route}')
-
-    def _apply_pending_route_switch(self) -> bool:
-        if not self._pending_route_switch_name:
-            return False
-
-        requested_route = self._pending_route_switch_name
-        self._pending_route_switch_name = None
-        self._route_switch_in_progress = True
-        self.get_logger().info(f'Applying dynamic route switch to {requested_route}')
-
-        if self._following_waypoints:
-            self.cancelTask()
-            self._following_waypoints = False
-            self._wait_for_task_exit(timeout_sec=2.0)
-            self._publish_zero_velocity()
-
-        try:
-            self._load_route_waypoints(requested_route)
-        except Exception as exc:
-            self._route_switch_in_progress = False
-            self.get_logger().error(f'Failed to load requested route "{requested_route}": {exc}')
-            return False
-
-        start_index = self._find_nearest_waypoint_index()
-        if not self._send_remaining_waypoints(start_index):
-            self._route_switch_in_progress = False
-            self.get_logger().error(
-                f'Nav2 rejected dynamic route switch to "{requested_route}" from waypoint {start_index}.'
-            )
-            return False
-
-        self._last_applied_route_name = requested_route
-        self._last_route_switch_time = time.monotonic()
-        self._route_switch_in_progress = False
-        self.get_logger().info(
-            f'Dynamic route switch applied: {requested_route}, resume from waypoint '
-            f'{start_index + 1}/{len(self._waypoints)}.'
-        )
-        return True
 
     def _resolve_waypoint_file(self, configured_path: str) -> str:
         if configured_path:
@@ -1611,12 +1504,6 @@ class CraicMissionCommander(BasicNavigator):
             rclpy.spin_once(self, timeout_sec=self.progress_check_period_sec)
             self._update_feedback_state()
 
-            if self._pending_route_switch_name:
-                if not self._apply_pending_route_switch():
-                    self._publish_zero_velocity()
-                    return 1
-                continue
-
             if self._should_trigger_final_stop():
                 self.get_logger().info(
                     f'Within {self._active_plan.stop_distance_m:.2f} m of final goal; forcing stop.'
@@ -1649,9 +1536,6 @@ class CraicMissionCommander(BasicNavigator):
                         return 1
                     continue
                 if result == TaskResult.CANCELED:
-                    if self._route_switch_in_progress or self._pending_route_switch_name:
-                        self.get_logger().info('CRAIC mission task canceled for dynamic route switch.')
-                        continue
                     self.get_logger().warn('CRAIC mission canceled.')
                     return 1
                 self.get_logger().error(f'CRAIC mission failed with result: {result}')

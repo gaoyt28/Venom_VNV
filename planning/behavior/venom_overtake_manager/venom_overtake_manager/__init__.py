@@ -1,1 +1,0 @@
-"""Overtake manager package."""
