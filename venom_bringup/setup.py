@@ -72,6 +72,8 @@ setup(
             'venom_bringup.craic_mission_main:main',
             'fake_vel_transform = '
             'venom_bringup.fake_vel_transform:main',
+            'rtk_sol_odom_node = '
+            'venom_bringup.rtk_sol_odom_node:main',
         ],
     },
 )
