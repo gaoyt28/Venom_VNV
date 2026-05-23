@@ -967,6 +967,27 @@ class CraicMissionCommander(BasicNavigator):
             timeout_sec,
         )
 
+    def _compute_turn_exit_pose(
+        self,
+        waypoint_index: int,
+    ) -> Optional[tuple[float, float, float]]:
+        if waypoint_index + 1 >= len(self._waypoints):
+            return None
+
+        action_waypoint = self._waypoints[waypoint_index]
+        next_waypoint = self._waypoints[waypoint_index + 1]
+        dx = next_waypoint.x - action_waypoint.x
+        dy = next_waypoint.y - action_waypoint.y
+        next_leg_distance = math.hypot(dx, dy)
+        if next_leg_distance < 0.15:
+            return None
+
+        outbound_heading = math.atan2(dy, dx)
+        exit_distance_m = min(1.1, max(0.45, next_leg_distance * 0.45))
+        exit_x = action_waypoint.x + math.cos(outbound_heading) * exit_distance_m
+        exit_y = action_waypoint.y + math.sin(outbound_heading) * exit_distance_m
+        return exit_x, exit_y, outbound_heading
+
     def _execute_turn_action(
         self,
         waypoint: CraicWaypoint,
@@ -990,13 +1011,50 @@ class CraicMissionCommander(BasicNavigator):
             ):
                 return False
 
+        turn_exit_pose = self._compute_turn_exit_pose(plan.goal_index)
+        if turn_exit_pose is None:
+            self._publish_zero_velocity()
+            self._sleep_with_spin(plan.settle_time_sec)
+            return self._rotate_to_yaw(
+                waypoint.yaw,
+                plan.yaw_tolerance_rad or 0.25,
+                plan.max_angular_speed_radps,
+                timeout_sec=self.turn_action_timeout_sec,
+            )
+
+        exit_x, exit_y, outbound_heading = turn_exit_pose
+        self.get_logger().info(
+            f'{plan.profile_name} using low-speed exit pose x={exit_x:.2f}, y={exit_y:.2f}, '
+            f'heading={outbound_heading:.3f} rad.'
+        )
+
+        self._publish_zero_velocity()
+        self._sleep_with_spin(max(plan.settle_time_sec * 0.5, 0.1))
+        if not self._rotate_to_yaw(
+            outbound_heading,
+            max(plan.yaw_tolerance_rad or 0.25, 0.20),
+            min(plan.max_angular_speed_radps, 0.75),
+            timeout_sec=max(self.turn_action_timeout_sec, 8.0),
+        ):
+            return False
+
+        if not self._creep_to_xy(
+            exit_x,
+            exit_y,
+            max(plan.position_tolerance_m or 0.35, 0.30),
+            min(plan.max_linear_speed_mps, self.turn_creep_max_linear_mps),
+            min(plan.max_angular_speed_radps, 0.75),
+            timeout_sec=max(self.turn_action_timeout_sec, 10.0),
+        ):
+            return False
+
         self._publish_zero_velocity()
         self._sleep_with_spin(plan.settle_time_sec)
         return self._rotate_to_yaw(
-            waypoint.yaw,
-            plan.yaw_tolerance_rad or 0.25,
-            plan.max_angular_speed_radps,
-            timeout_sec=self.turn_action_timeout_sec,
+            outbound_heading,
+            max(plan.yaw_tolerance_rad or 0.25, 0.18),
+            min(plan.max_angular_speed_radps, 0.75),
+            timeout_sec=max(self.turn_action_timeout_sec, 8.0),
         )
 
     def _execute_lane_change_action(
@@ -1283,6 +1341,13 @@ class CraicMissionCommander(BasicNavigator):
         self._active_generated_waypoints_in_use = False
         self._active_overtake_geometry_enabled = False
         use_generated_waypoints = bool(plan.generated_waypoints)
+        if plan.profile_name in {'turn_left', 'turn_right'}:
+            use_generated_waypoints = False
+            if plan.generated_waypoints:
+                self.get_logger().info(
+                    f'Prepared {len(plan.generated_waypoints)} turn geometry waypoint(s) for '
+                    f'{plan.profile_name}; low-speed manual turn executor will use them implicitly after arrival.'
+                )
         if plan.profile_name == 'overtake' and plan.generated_waypoints:
             use_generated_waypoints = self._should_use_overtake_geometry()
             self._active_overtake_geometry_enabled = use_generated_waypoints
@@ -1437,7 +1502,11 @@ class CraicMissionCommander(BasicNavigator):
         else:
             action_success = self._is_active_special_action_satisfied()
 
-        if action_success and self._is_active_special_action_satisfied():
+        action_completed = action_success and self._is_active_special_action_satisfied()
+        if self._active_plan.profile_name in {'turn_left', 'turn_right'} and action_success:
+            action_completed = True
+
+        if action_completed:
             if self._active_plan.settle_time_sec > 0.0:
                 self.get_logger().info(
                     f'{self._active_plan.profile_name} goal satisfied; settling for '
