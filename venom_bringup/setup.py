@@ -74,6 +74,10 @@ setup(
             'venom_bringup.fake_vel_transform:main',
             'rtk_sol_odom_node = '
             'venom_bringup.rtk_sol_odom_node:main',
+            'craic_obstacle_processor = '
+            'venom_bringup.craic_obstacle_processor:main',
+            'rtk_tcp_fix_bridge = '
+            'venom_bringup.rtk_tcp_fix_bridge:main',
         ],
     },
 )
