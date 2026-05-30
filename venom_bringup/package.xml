@@ -27,12 +27,8 @@
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>scout_base</exec_depend>
   <exec_depend>livox_ros_driver2</exec_depend>
-  <exec_depend>venom_px4_bridge</exec_depend>
   <exec_depend>realsense2_camera</exec_depend>
   <exec_depend>hik_camera</exec_depend>
-  <exec_depend>armor_detector</exec_depend>
-  <exec_depend>armor_tracker</exec_depend>
-  <exec_depend>auto_aim_solver</exec_depend>
   <exec_depend>venom_serial_driver</exec_depend>
   <exec_depend>launch_sim</exec_depend>
 
