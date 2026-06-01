@@ -512,11 +512,6 @@ def build_execution_plan(
             generated_waypoints=generated_waypoints,
         )
     if waypoint.action == LANE_CHANGE_LEFT_ACTION:
-        generated_waypoints = build_generated_action_waypoints(
-            waypoints,
-            start_index,
-            'lane_change_left',
-        )
         return WaypointExecutionPlan(
             profile_name='lane_change_left',
             start_index=start_index,
@@ -531,14 +526,8 @@ def build_execution_plan(
             yaw_tolerance_rad=config.lane_change_left_yaw_tolerance_rad,
             settle_time_sec=config.lane_change_left_settle_time_sec,
             goal_retry_limit=config.special_action_retry_limit,
-            generated_waypoints=generated_waypoints,
         )
     if waypoint.action == LANE_CHANGE_RIGHT_ACTION:
-        generated_waypoints = build_generated_action_waypoints(
-            waypoints,
-            start_index,
-            'lane_change_right',
-        )
         return WaypointExecutionPlan(
             profile_name='lane_change_right',
             start_index=start_index,
@@ -553,7 +542,6 @@ def build_execution_plan(
             yaw_tolerance_rad=config.lane_change_right_yaw_tolerance_rad,
             settle_time_sec=config.lane_change_right_settle_time_sec,
             goal_retry_limit=config.special_action_retry_limit,
-            generated_waypoints=generated_waypoints,
         )
     if waypoint.action == OVERTAKE_ACTION:
         generated_waypoints = build_generated_action_waypoints(

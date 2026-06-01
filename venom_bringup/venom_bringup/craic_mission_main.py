@@ -253,6 +253,8 @@ class CraicMissionCommander(BasicNavigator):
         self.declare_parameter('lane_change_left_max_linear_speed_mps', 0.95)
         self.declare_parameter('lane_change_left_max_speed_xy_mps', 0.95)
         self.declare_parameter('lane_change_left_max_angular_speed_radps', 0.75)
+        self.declare_parameter('lane_change_slant_angle_rad', 1.0472)
+        self.declare_parameter('lane_change_slant_distance_m', 1.2)
         self.declare_parameter('lane_change_right_position_tolerance_m', 0.28)
         self.declare_parameter('lane_change_right_yaw_tolerance_rad', 0.20)
         self.declare_parameter('lane_change_right_settle_time_sec', 0.25)
@@ -417,6 +419,12 @@ class CraicMissionCommander(BasicNavigator):
         )
         self.lane_change_left_max_angular_speed_radps = float(
             self.get_parameter('lane_change_left_max_angular_speed_radps').value
+        )
+        self.lane_change_slant_angle_rad = float(
+            self.get_parameter('lane_change_slant_angle_rad').value
+        )
+        self.lane_change_slant_distance_m = float(
+            self.get_parameter('lane_change_slant_distance_m').value
         )
         self.lane_change_right_position_tolerance_m = float(
             self.get_parameter('lane_change_right_position_tolerance_m').value
@@ -956,19 +964,70 @@ class CraicMissionCommander(BasicNavigator):
         waypoint: CraicWaypoint,
         plan: WaypointExecutionPlan,
     ) -> bool:
-        if not self._creep_to_waypoint(
-            waypoint,
-            plan.position_tolerance_m or 0.28,
-            plan.max_linear_speed_mps,
-            plan.max_angular_speed_radps,
+        distance_error = self._distance_to_waypoint(waypoint)
+        if distance_error is None or self._current_yaw is None or self._current_pose_xy is None:
+            return False
+
+        if distance_error > self.special_action_entry_distance_m:
+            self.get_logger().warn(
+                f'{plan.profile_name} is still {distance_error:.2f} m away from the action waypoint; '
+                'running a short low-speed creep before fixed slant lane change.'
+            )
+            if not self._creep_to_waypoint(
+                waypoint,
+                plan.position_tolerance_m or 0.28,
+                plan.max_linear_speed_mps,
+                plan.max_angular_speed_radps,
+                timeout_sec=self.turn_action_timeout_sec,
+            ):
+                return False
+
+        if self._current_yaw is None or self._current_pose_xy is None:
+            return False
+
+        original_yaw = self._current_yaw
+        direction = 1.0 if plan.profile_name == 'lane_change_left' else -1.0
+        slant_yaw = normalize_angle(
+            original_yaw + direction * abs(self.lane_change_slant_angle_rad)
+        )
+        self.get_logger().info(
+            f'{plan.profile_name}: rotating {math.degrees(direction * abs(self.lane_change_slant_angle_rad)):.1f} deg, '
+            f'driving {self.lane_change_slant_distance_m:.2f} m, then returning to original heading.'
+        )
+
+        self._publish_zero_velocity()
+        self._sleep_with_spin(max(plan.settle_time_sec, 0.1))
+        if not self._rotate_to_yaw(
+            slant_yaw,
+            plan.yaw_tolerance_rad or 0.20,
+            min(plan.max_angular_speed_radps, 0.8),
             timeout_sec=self.turn_action_timeout_sec,
         ):
             return False
 
+        if self._current_pose_xy is None:
+            return False
+        start_x, start_y = self._current_pose_xy
+        target_x = start_x + math.cos(slant_yaw) * self.lane_change_slant_distance_m
+        target_y = start_y + math.sin(slant_yaw) * self.lane_change_slant_distance_m
+        travel_timeout_sec = max(
+            self.turn_action_timeout_sec,
+            self.lane_change_slant_distance_m / max(plan.max_linear_speed_mps, 0.05) * 4.0,
+        )
+        if not self._creep_to_xy(
+            target_x,
+            target_y,
+            plan.position_tolerance_m or 0.20,
+            plan.max_linear_speed_mps,
+            plan.max_angular_speed_radps,
+            timeout_sec=travel_timeout_sec,
+        ):
+            return False
+
         self._publish_zero_velocity()
-        self._sleep_with_spin(plan.settle_time_sec)
+        self._sleep_with_spin(max(plan.settle_time_sec, 0.1))
         return self._rotate_to_yaw(
-            waypoint.yaw,
+            original_yaw,
             plan.yaw_tolerance_rad or 0.20,
             min(plan.max_angular_speed_radps, 0.8),
             timeout_sec=self.turn_action_timeout_sec,
@@ -1421,7 +1480,12 @@ class CraicMissionCommander(BasicNavigator):
             action_success = self._is_active_special_action_satisfied()
 
         action_completed = action_success and self._is_active_special_action_satisfied()
-        if self._active_plan.profile_name in {'turn_left', 'turn_right'} and action_success:
+        if self._active_plan.profile_name in {
+            'turn_left',
+            'turn_right',
+            'lane_change_left',
+            'lane_change_right',
+        } and action_success:
             action_completed = True
 
         if action_completed:
