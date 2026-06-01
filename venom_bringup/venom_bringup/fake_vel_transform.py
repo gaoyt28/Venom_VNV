@@ -43,6 +43,7 @@ class FakeVelTransform(Node):
         self.declare_parameter('fake_base_frame', 'base_link_fake')
         self.declare_parameter('spin_speed', 0.0)
         self.declare_parameter('publish_frequency_hz', 20.0)
+        self.declare_parameter('cmd_vel_timeout_sec', 0.25)
 
         self.input_cmd_vel_topic = str(self.get_parameter('input_cmd_vel_topic').value)
         self.output_cmd_vel_topic = str(self.get_parameter('output_cmd_vel_topic').value)
@@ -51,12 +52,15 @@ class FakeVelTransform(Node):
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.fake_base_frame = str(self.get_parameter('fake_base_frame').value)
         self.spin_speed = float(self.get_parameter('spin_speed').value)
+        self.cmd_vel_timeout_sec = float(self.get_parameter('cmd_vel_timeout_sec').value)
 
         publish_frequency_hz = float(self.get_parameter('publish_frequency_hz').value)
         publish_period = 1.0 / max(publish_frequency_hz, 1.0)
 
         self._base_link_yaw = 0.0
         self._current_angle = 0.0
+        self._last_cmd_time = None
+        self._saw_cmd_vel = False
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -88,6 +92,9 @@ class FakeVelTransform(Node):
         self._current_angle = teb_angle - self._base_link_yaw
 
     def _cmd_vel_callback(self, msg: Twist) -> None:
+        self._last_cmd_time = self.get_clock().now()
+        self._saw_cmd_vel = True
+
         try:
             transform = self._tf_buffer.lookup_transform(
                 self.odom_frame,
@@ -108,7 +115,9 @@ class FakeVelTransform(Node):
 
         angle_diff = -self._current_angle
         transformed = Twist()
-        transformed.angular.z = self.spin_speed if abs(msg.angular.z) > 1e-6 else 0.0
+        transformed.angular.z = msg.angular.z
+        if abs(self.spin_speed) > 1e-6 and abs(msg.angular.z) > 1e-6:
+            transformed.angular.z = math.copysign(abs(self.spin_speed), msg.angular.z)
         transformed.linear.x = (
             msg.linear.x * math.cos(angle_diff) + msg.linear.y * math.sin(angle_diff)
         )
@@ -117,6 +126,9 @@ class FakeVelTransform(Node):
         )
         transformed.linear.z = msg.linear.z
         self._cmd_vel_pub.publish(transformed)
+
+    def _publish_zero_velocity(self) -> None:
+        self._cmd_vel_pub.publish(Twist())
 
     def _publish_transform(self) -> None:
         transform = TransformStamped()
@@ -131,6 +143,15 @@ class FakeVelTransform(Node):
         transform.transform.rotation.w = qw
         self._tf_broadcaster.sendTransform(transform)
 
+        if not self._saw_cmd_vel or self.cmd_vel_timeout_sec <= 0.0:
+            return
+        if self._last_cmd_time is None:
+            return
+
+        cmd_age_sec = (self.get_clock().now() - self._last_cmd_time).nanoseconds / 1e9
+        if cmd_age_sec >= self.cmd_vel_timeout_sec:
+            self._publish_zero_velocity()
+
 
 def main() -> None:
     rclpy.init()
@@ -140,6 +161,8 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        for _ in range(5):
+            node._publish_zero_velocity()
         node.destroy_node()
         rclpy.shutdown()
 

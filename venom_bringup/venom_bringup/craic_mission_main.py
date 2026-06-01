@@ -15,6 +15,7 @@ from geometry_msgs.msg import PoseStamped, Twist
 from lifecycle_msgs.srv import GetState
 from nav_msgs.msg import Odometry
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+from rclpy.qos import qos_profile_sensor_data
 from rcl_interfaces.msg import Parameter, ParameterDescriptor, ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
 from sensor_msgs.msg import LaserScan
@@ -111,7 +112,7 @@ class CraicMissionCommander(BasicNavigator):
                 LaserScan,
                 self.overtake_scan_topic,
                 self._on_overtake_scan,
-                20,
+                qos_profile_sensor_data,
             )
         self._controller_param_client = self.create_client(
             SetParameters,
@@ -1132,7 +1133,31 @@ class CraicMissionCommander(BasicNavigator):
                 'check bt_navigator, planner_server, and controller_server logs.'
             )
 
-        self._waitForNodeToActivate('bt_navigator')
+        request = GetState.Request()
+        last_state_log_time = 0.0
+        while time.monotonic() < deadline:
+            future = state_client.call_async(request)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=1.0)
+
+            if future.done() and future.result() is not None:
+                state = future.result().current_state.label
+                if state == 'active':
+                    self.get_logger().info('bt_navigator is active.')
+                    return
+                now = time.monotonic()
+                if now - last_state_log_time >= 2.0:
+                    self.get_logger().info(f'bt_navigator state is "{state}", waiting...')
+                    last_state_log_time = now
+            else:
+                now = time.monotonic()
+                if now - last_state_log_time >= 2.0:
+                    self.get_logger().warn(f'{service_name} did not respond, waiting...')
+                    last_state_log_time = now
+
+        raise RuntimeError(
+            'Timed out waiting for bt_navigator to become active. '
+            'Check Nav2 lifecycle_manager_navigation and bt_navigator logs.'
+        )
 
     def _wait_for_runtime_readiness(self) -> None:
         self.get_logger().info(

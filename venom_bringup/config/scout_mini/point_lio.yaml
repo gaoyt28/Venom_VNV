@@ -66,8 +66,8 @@
         publish:
             path_en: True
             scan_publish_en: True
-            scan_bodyframe_pub_en: False
-            tf_send_en: True                                # publish odom -> base_link TF
+            scan_bodyframe_pub_en: True
+            tf_send_en: False                               # Nav2 uses scout_base odom -> base_link TF
 
         pcd_save:
             pcd_save_en: True                               # save PCD for relocalization map
