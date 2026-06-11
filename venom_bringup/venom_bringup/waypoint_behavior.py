@@ -454,6 +454,7 @@ class WaypointExecutionPlan:
     settle_time_sec: float = 0.0
     goal_retry_limit: int = 0
     generated_waypoints: tuple[CraicWaypoint, ...] = ()
+    overtake_side: str = 'left'
 
     @property
     def is_special_action(self) -> bool:
