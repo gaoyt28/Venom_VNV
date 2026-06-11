@@ -143,11 +143,11 @@ controller_server:
       debug_trajectory_details: True
       min_vel_x: 0.0
       min_vel_y: 0.0
-      max_vel_x: 0.45
+      max_vel_x: 0.70
       max_vel_y: 0.0
-      max_vel_theta: 0.8
+      max_vel_theta: 1.0
       min_speed_xy: 0.0
-      max_speed_xy: 0.45
+      max_speed_xy: 0.70
       min_speed_theta: 0.0
       acc_lim_x: 1.2
       acc_lim_y: 0.0
