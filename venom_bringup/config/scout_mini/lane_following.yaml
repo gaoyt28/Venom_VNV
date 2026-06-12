@@ -1,0 +1,58 @@
+usb_camera_node:
+  ros__parameters:
+    camera_index: 1
+    frame_id: camera_link
+    image_topic: /camera/image_raw
+    width: 1280
+    height: 720
+    fps: 20.0
+    use_dshow: false
+
+lane_detector_node:
+  ros__parameters:
+    image_topic: /camera/image_raw
+    debug_image_topic: /lane/debug_image
+    center_error_topic: /lane/center_error
+    valid_topic: /lane/valid
+    target_width: 1280
+    target_height: 720
+    # MATLAB calibration for the industrial camera at 1920x1080.
+    # The node scales fx/fy/cx/cy to target_width/target_height.
+    calibration_width: 1920
+    calibration_height: 1080
+    camera_matrix: [4322.6, 0.0, 938.2, 0.0, 4322.3, 549.5, 0.0, 0.0, 1.0]
+    distortion_coefficients: [-0.5656, 0.3260, 0.0, 0.0, -0.2207]
+    use_undistort: true
+    use_exposure_adjust: false
+    gamma: 1.4
+    brightness_beta: -15.0
+    # Re-tune these four source points after fixing the camera on the vehicle.
+    # Order: top-left, top-right, bottom-left, bottom-right.
+    perspective_points: [520.0, 330.0, 880.0, 330.0, 180.0, 719.0, 1240.0, 719.0]
+    s_thresh_min: 130
+    s_thresh_max: 255
+    sx_thresh_min: 25
+    sx_thresh_max: 220
+    l_thresh_min: 80
+    lane_width_min_px: 300.0
+    lane_width_max_px: 900.0
+    max_center_jump_px: 180.0
+    fit_smoothing_alpha: 0.70
+    horizontal_filter_width_px: 85
+    vertical_connect_height_px: 31
+
+lane_follow_controller:
+  ros__parameters:
+    center_error_topic: /lane/center_error
+    valid_topic: /lane/valid
+    cmd_vel_topic: /venom_cmd_vel
+    obstacle_topic: /obstacle_points
+    enable_obstacle_stop: true
+    linear_speed_mps: 0.12
+    kp_angular: -0.0025
+    max_angular_z: 0.45
+    lane_timeout_sec: 0.5
+    control_rate_hz: 20.0
+    obstacle_stop_x_m: 1.8
+    obstacle_stop_abs_y_m: 0.65
+    obstacle_hold_sec: 0.4

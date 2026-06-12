@@ -78,6 +78,12 @@ setup(
             'venom_bringup.craic_obstacle_processor:main',
             'rtk_tcp_fix_bridge = '
             'venom_bringup.rtk_tcp_fix_bridge:main',
+            'usb_camera_node = '
+            'venom_bringup.usb_camera_node:main',
+            'lane_detector_node = '
+            'venom_bringup.lane_detector_node:main',
+            'lane_follow_controller = '
+            'venom_bringup.lane_follow_controller:main',
         ],
     },
 )

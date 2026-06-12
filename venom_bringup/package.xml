@@ -17,6 +17,8 @@
   <depend>nav2_simple_commander</depend>
   <depend>pointcloud_to_laserscan</depend>
   <depend>yolo_interfaces</depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
