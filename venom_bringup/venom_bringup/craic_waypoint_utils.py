@@ -9,6 +9,13 @@ from typing import List, Sequence
 
 
 EARTH_RADIUS_METERS = 6378137.0
+WGS84_ECCENTRICITY_SQUARED = 0.0066943799901413165
+WGS84_SECOND_ECCENTRICITY_SQUARED = (
+    WGS84_ECCENTRICITY_SQUARED / (1.0 - WGS84_ECCENTRICITY_SQUARED)
+)
+UTM_SCALE_FACTOR = 0.9996
+UTM_FALSE_EASTING_METERS = 500000.0
+UTM_FALSE_NORTHING_METERS = 10000000.0
 
 ACTION_LABELS = {
     0: 'unknown',
@@ -37,8 +44,127 @@ class CraicWaypoint:
     action_label: str
 
 
+@dataclass(frozen=True)
+class UtmCoordinate:
+    """One WGS84 UTM coordinate."""
+
+    easting: float
+    northing: float
+    zone_number: int
+    hemisphere: str
+
+
 def _normalize_angle(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def _utm_zone_number(longitude_deg: float, latitude_deg: float) -> int:
+    """Resolve the WGS84 UTM zone for one geodetic coordinate."""
+    if not -80.0 <= latitude_deg <= 84.0:
+        raise ValueError(
+            'UTM projection only supports latitudes between -80 and 84 degrees. '
+            f'Got latitude={latitude_deg:.6f}.'
+        )
+
+    if math.isclose(longitude_deg, 180.0):
+        zone_number = 60
+    else:
+        zone_number = int((longitude_deg + 180.0) / 6.0) + 1
+
+    # Norway special case.
+    if 56.0 <= latitude_deg < 64.0 and 3.0 <= longitude_deg < 12.0:
+        zone_number = 32
+
+    # Svalbard special cases.
+    if 72.0 <= latitude_deg < 84.0:
+        if 0.0 <= longitude_deg < 9.0:
+            zone_number = 31
+        elif 9.0 <= longitude_deg < 21.0:
+            zone_number = 33
+        elif 21.0 <= longitude_deg < 33.0:
+            zone_number = 35
+        elif 33.0 <= longitude_deg < 42.0:
+            zone_number = 37
+
+    return min(max(zone_number, 1), 60)
+
+
+def geodetic_to_utm(longitude_deg: float, latitude_deg: float) -> UtmCoordinate:
+    """Project one longitude/latitude pair into a WGS84 UTM coordinate."""
+    zone_number = _utm_zone_number(longitude_deg, latitude_deg)
+    hemisphere = 'N' if latitude_deg >= 0.0 else 'S'
+
+    lat_rad = math.radians(latitude_deg)
+    lon_rad = math.radians(longitude_deg)
+    lon_origin_deg = (zone_number - 1) * 6 - 180 + 3
+    lon_origin_rad = math.radians(lon_origin_deg)
+
+    sin_lat = math.sin(lat_rad)
+    cos_lat = math.cos(lat_rad)
+    tan_lat = math.tan(lat_rad)
+
+    n_value = EARTH_RADIUS_METERS / math.sqrt(
+        1.0 - WGS84_ECCENTRICITY_SQUARED * sin_lat * sin_lat
+    )
+    t_value = tan_lat * tan_lat
+    c_value = WGS84_SECOND_ECCENTRICITY_SQUARED * cos_lat * cos_lat
+    a_value = cos_lat * (lon_rad - lon_origin_rad)
+
+    ecc2 = WGS84_ECCENTRICITY_SQUARED
+    ecc4 = ecc2 * ecc2
+    ecc6 = ecc4 * ecc2
+    meridional_arc = EARTH_RADIUS_METERS * (
+        (1.0 - ecc2 / 4.0 - 3.0 * ecc4 / 64.0 - 5.0 * ecc6 / 256.0) * lat_rad
+        - (3.0 * ecc2 / 8.0 + 3.0 * ecc4 / 32.0 + 45.0 * ecc6 / 1024.0)
+        * math.sin(2.0 * lat_rad)
+        + (15.0 * ecc4 / 256.0 + 45.0 * ecc6 / 1024.0) * math.sin(4.0 * lat_rad)
+        - (35.0 * ecc6 / 3072.0) * math.sin(6.0 * lat_rad)
+    )
+
+    easting = UTM_FALSE_EASTING_METERS + UTM_SCALE_FACTOR * n_value * (
+        a_value
+        + (1.0 - t_value + c_value) * a_value**3 / 6.0
+        + (
+            5.0
+            - 18.0 * t_value
+            + t_value * t_value
+            + 72.0 * c_value
+            - 58.0 * WGS84_SECOND_ECCENTRICITY_SQUARED
+        )
+        * a_value**5
+        / 120.0
+    )
+
+    northing = UTM_SCALE_FACTOR * (
+        meridional_arc
+        + n_value
+        * tan_lat
+        * (
+            a_value * a_value / 2.0
+            + (5.0 - t_value + 9.0 * c_value + 4.0 * c_value * c_value)
+            * a_value**4
+            / 24.0
+            + (
+                61.0
+                - 58.0 * t_value
+                + t_value * t_value
+                + 600.0 * c_value
+                - 330.0 * WGS84_SECOND_ECCENTRICITY_SQUARED
+            )
+            * a_value**6
+            / 720.0
+        )
+    )
+
+    if hemisphere == 'S':
+        northing += UTM_FALSE_NORTHING_METERS
+
+    return UtmCoordinate(
+        easting=easting,
+        northing=northing,
+        zone_number=zone_number,
+        hemisphere=hemisphere,
+    )
 
 
 def infer_coordinate_mode(value_a: float, value_b: float) -> str:
@@ -58,14 +184,22 @@ def geodetic_to_local_xy(
     map_origin_x_m: float,
     map_origin_y_m: float,
 ) -> tuple[float, float]:
-    """Project lon/lat into a local ENU-style planar map frame."""
-    lon = math.radians(longitude_deg)
-    lat = math.radians(latitude_deg)
-    lon0 = math.radians(origin_longitude_deg)
-    lat0 = math.radians(origin_latitude_deg)
+    """Project lon/lat into the local map frame using UTM offsets."""
+    point_utm = geodetic_to_utm(longitude_deg, latitude_deg)
+    origin_utm = geodetic_to_utm(origin_longitude_deg, origin_latitude_deg)
 
-    east = (lon - lon0) * math.cos((lat + lat0) * 0.5) * EARTH_RADIUS_METERS
-    north = (lat - lat0) * EARTH_RADIUS_METERS
+    if (
+        point_utm.zone_number != origin_utm.zone_number
+        or point_utm.hemisphere != origin_utm.hemisphere
+    ):
+        raise ValueError(
+            'Geodetic waypoint and map origin must be in the same UTM zone. '
+            f'Waypoint zone={point_utm.zone_number}{point_utm.hemisphere}, '
+            f'origin zone={origin_utm.zone_number}{origin_utm.hemisphere}.'
+        )
+
+    east = point_utm.easting - origin_utm.easting
+    north = point_utm.northing - origin_utm.northing
 
     cos_yaw = math.cos(map_origin_yaw_rad)
     sin_yaw = math.sin(map_origin_yaw_rad)
@@ -103,7 +237,11 @@ def load_craic_waypoints(
     map_origin_y_m: float = 0.0,
     use_first_waypoint_as_origin: bool = True,
 ) -> List[CraicWaypoint]:
-    """Load the competition waypoint.txt file."""
+    """Load the competition waypoint.txt file.
+
+    Geodetic input rows are first projected into WGS84 UTM coordinates and
+    then shifted into the local map frame using the configured origin.
+    """
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f'Waypoint file not found: {file_path}')

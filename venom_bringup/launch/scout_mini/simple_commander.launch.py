@@ -28,8 +28,16 @@ def generate_launch_description():
         DeclareLaunchArgument('coordinate_mode', default_value='auto'),
         DeclareLaunchArgument('pose_tracking_topic', default_value='/odometry/global'),
         DeclareLaunchArgument('cmd_vel_topic', default_value='/cmd_vel'),
-        DeclareLaunchArgument('map_origin_longitude_deg', default_value='0.0'),
-        DeclareLaunchArgument('map_origin_latitude_deg', default_value='0.0'),
+        DeclareLaunchArgument(
+            'map_origin_longitude_deg',
+            default_value='0.0',
+            description='Longitude of the local map origin used for UTM projection.',
+        ),
+        DeclareLaunchArgument(
+            'map_origin_latitude_deg',
+            default_value='0.0',
+            description='Latitude of the local map origin used for UTM projection.',
+        ),
         DeclareLaunchArgument('map_origin_x_m', default_value='0.0'),
         DeclareLaunchArgument('map_origin_y_m', default_value='0.0'),
         DeclareLaunchArgument('map_origin_yaw_rad', default_value='0.0'),
